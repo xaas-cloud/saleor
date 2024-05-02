@@ -3871,6 +3871,86 @@ def test_checkout_complete_payment_create_create_run_in_meantime(
     assert errors[0]["code"] == CheckoutErrorCode.INACTIVE_PAYMENT.name
 
 
+@pytest.mark.django_db(transaction=True)
+def test_checkout_complete_payment_create_create_run_before_post_payment_process(
+    site_settings,
+    user_api_client,
+    checkout_without_shipping_required,
+    gift_card,
+    payment_dummy,
+    address,
+    shipping_method,
+):
+    # given
+    checkout = checkout_without_shipping_required
+    checkout.shipping_address = address
+    checkout.shipping_method = shipping_method
+    checkout.billing_address = address
+    checkout.metadata_storage.store_value_in_metadata(items={"accepted": "true"})
+    checkout.metadata_storage.store_value_in_private_metadata(
+        items={"accepted": "false"}
+    )
+    checkout.save()
+
+    manager = get_plugins_manager(allow_replica=False)
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+    total = calculations.calculate_checkout_total_with_gift_cards(
+        manager, checkout_info, lines, address
+    )
+    channel = checkout.channel
+    channel.automatically_confirm_all_new_orders = True
+    channel.save()
+    payment = payment_dummy
+    payment.is_active = True
+    payment.order = None
+    payment.total = total.gross.amount
+    payment.currency = total.gross.currency
+    payment.checkout = checkout
+    payment.save()
+    assert not payment.transactions.exists()
+
+    redirect_url = "https://www.example.com"
+    variables = {"id": to_global_id_or_none(checkout), "redirectUrl": redirect_url}
+
+    # Call CheckoutPaymentCreate mutation during the CheckoutComplete call processing.
+    # It should cause deactivation of current payment and creation of new one.
+    def call_payment_create_mutation(*args, **kwargs):
+        from ....payment.tests.mutations.test_checkout_payment_create import (
+            CREATE_PAYMENT_MUTATION,
+            DUMMY_GATEWAY,
+        )
+
+        variables = {
+            "id": to_global_id_or_none(checkout),
+            "input": {
+                "gateway": DUMMY_GATEWAY,
+                "token": "sample-token",
+                "amount": total.gross.amount,
+            },
+        }
+
+        user_api_client.post_graphql(CREATE_PAYMENT_MUTATION, variables)
+
+    # when
+    with before_after.before(
+        "saleor.checkout.complete_checkout.complete_checkout_post_payment_part",
+        call_payment_create_mutation,
+    ):
+        response = user_api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["checkoutComplete"]
+    errors = data["errors"]
+    assert not errors
+    assert data["order"]
+    payment.refresh_from_db()
+    assert payment.is_active is False
+    order = Order.objects.first()
+    assert order.payments.count() == 2
+
+
 @pytest.mark.integration
 def test_checkout_complete_line_deleted_in_the_meantime(
     user_api_client,
