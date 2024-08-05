@@ -3,6 +3,7 @@ from datetime import datetime
 
 import graphene
 import pytz
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files import File
 from django.db.models import F
@@ -23,6 +24,7 @@ from ....product.models import CollectionProduct
 from ....thumbnail.utils import get_filename_from_url
 from ....warehouse.models import Warehouse
 from ....webhook.event_types import WebhookEventAsyncType
+from ....webhook.events.product import product_created
 from ....webhook.utils import get_webhooks_for_event
 from ...attribute.types import AttributeValueInput
 from ...attribute.utils import ProductAttributeAssignmentMixin
@@ -46,6 +48,7 @@ from ...core.validators import clean_seo_fields
 from ...core.validators.file import clean_image_file, is_image_url, validate_image_url
 from ...meta.inputs import MetadataInput
 from ...plugins.dataloaders import get_plugin_manager_promise
+from ...utils import get_user_or_app_from_context
 from ..mutations.product.product_create import ProductCreateInput
 from ..types import Product
 from ..utils import ALT_CHAR_LIMIT
@@ -870,7 +873,17 @@ class ProductBulkCreate(BaseMutation):
         product_ids = []
         webhooks = get_webhooks_for_event(WebhookEventAsyncType.PRODUCT_CREATED)
         for product in products:
-            cls.call_event(manager.product_created, product.node, webhooks=webhooks)
+            if settings.USE_LEGACY_WEBHOOK_PLUGIN:
+                manager = get_plugin_manager_promise(info.context).get()
+                cls.call_event(manager.product_created, product.node, webhooks=webhooks)
+            else:
+                requestor = get_user_or_app_from_context(info.context)
+                cls.call_event(
+                    product_created,
+                    product,
+                    requestor,
+                    allow_replica=getattr(info.context, "allow_replica", True),
+                )
             product_ids.append(product.node.id)
 
         webhooks = get_webhooks_for_event(WebhookEventAsyncType.PRODUCT_VARIANT_CREATED)

@@ -1,4 +1,5 @@
 import graphene
+from django.conf import settings
 from django.core.exceptions import ValidationError
 
 from .....attribute import models as attribute_models
@@ -7,6 +8,7 @@ from .....core.utils.editorjs import clean_editor_js
 from .....permission.enums import ProductPermissions
 from .....product import models
 from .....product.error_codes import ProductErrorCode
+from .....webhook.events.product import product_created
 from ....attribute.types import AttributeValueInput
 from ....attribute.utils import AttrValuesInput, ProductAttributeAssignmentMixin
 from ....channel import ChannelContext
@@ -25,6 +27,7 @@ from ....core.types import BaseInputObjectType, NonNullList, ProductError, SeoIn
 from ....core.validators import clean_seo_fields, validate_slug_and_generate_if_needed
 from ....meta.inputs import MetadataInput
 from ....plugins.dataloaders import get_plugin_manager_promise
+from ....utils import get_user_or_app_from_context
 from ...types import Product
 from ..utils import clean_tax_code
 
@@ -195,9 +198,7 @@ class ProductCreate(ModelMutation):
             except ValidationError as exc:
                 raise ValidationError({"attributes": exc})
 
-        manager = get_plugin_manager_promise(info.context).get()
-        clean_tax_code(cleaned_input, manager)
-
+        clean_tax_code(cleaned_input)
         clean_seo_fields(cleaned_input)
         return cleaned_input
 
@@ -219,8 +220,18 @@ class ProductCreate(ModelMutation):
     @classmethod
     def post_save_action(cls, info: ResolveInfo, instance, _cleaned_input):
         product = models.Product.objects.get(pk=instance.pk)
-        manager = get_plugin_manager_promise(info.context).get()
-        cls.call_event(manager.product_created, product)
+
+        if settings.USE_LEGACY_WEBHOOK_PLUGIN:
+            manager = get_plugin_manager_promise(info.context).get()
+            cls.call_event(manager.product_created, product)
+        else:
+            requestor = get_user_or_app_from_context(info.context)
+            cls.call_event(
+                product_created,
+                product,
+                requestor,
+                allow_replica=getattr(info.context, "allow_replica", True),
+            )
 
     @classmethod
     def perform_mutation(cls, _root, info: ResolveInfo, /, **data):
