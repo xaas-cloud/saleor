@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 import decimal
 import hashlib
 import json
@@ -55,6 +56,7 @@ from . import signature_for_payload
 
 logger = logging.getLogger(__name__)
 task_logger = get_task_logger(f"{__name__}.celery")
+external_requests_duration: ContextVar[int] = ContextVar("external_requests_duration", default=0)
 
 
 DEFAULT_TAX_CODE = "UNMAPPED"
@@ -139,14 +141,15 @@ def send_webhook_using_http(
         headers.update(custom_headers)
 
     try:
-        response = HTTPClient.send_request(
-            "POST",
-            target_url,
-            data=message,
-            headers=headers,
-            timeout=timeout,
-            allow_redirects=False,
-        )
+        with catch_duration_time() as duration:
+            response = HTTPClient.send_request(
+                "POST",
+                target_url,
+                data=message,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=False,
+            )
     except RequestException as e:
         if e.response:
             return WebhookResponse(
@@ -167,6 +170,8 @@ def send_webhook_using_http(
             request_headers=headers,
         )
         return result
+    finally:
+        external_requests_duration.set(external_requests_duration.get() + duration())
 
     return WebhookResponse(
         content=response.text,

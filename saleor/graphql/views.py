@@ -3,6 +3,7 @@ import importlib
 import json
 from inspect import isclass
 from typing import Any, Optional, Union
+import time
 
 import opentracing
 import opentracing.tags
@@ -31,6 +32,8 @@ from .utils import format_error, query_fingerprint, query_identifier
 from .utils.validators import check_if_query_contains_only_schema
 
 INT_ERROR_MSG = "Int cannot represent non 32-bit signed integer value"
+
+from ..webhook.transport.utils import external_requests_duration
 
 
 def tracing_wrapper(execute, sql, params, many, context):
@@ -257,6 +260,7 @@ class GraphQLView(View):
             return None, ExecutionResult(errors=[e], invalid=True)
 
     def execute_graphql_request(self, request: HttpRequest, data: dict):
+        start_t = time.time()
         with opentracing.global_tracer().start_active_span("graphql_query") as scope:
             span = scope.span
             span.set_tag(opentracing.tags.COMPONENT, "graphql")
@@ -342,6 +346,17 @@ class GraphQLView(View):
                     e = GraphQLError(str(e))
                 return ExecutionResult(errors=[e], invalid=True)
             finally:
+                total_t = time.time() - start_t
+                print("total time: ", total_t)
+                print("external requests duration: ", external_requests_duration.get())
+                print("time without external requests: ", total_t -
+                      external_requests_duration.get())
+
+                # span.set_tag("graphql.total_time", total_t)
+                # span.set_tag("graphql.requests_time", external_requests_duration.get())
+                # span.set_tag("graphql.time_excluding_requests", total_t -
+                #              external_requests_duration.get())
+
                 clear_context(context)
 
     @staticmethod
